@@ -1,0 +1,177 @@
+# build.ps1 — generates the Base64 -EncodedCommand for VaultKeeper.
+# Usage:  powershell -ExecutionPolicy Bypass -File .\build.ps1
+# Output: the Base64 string on stdout, ready to paste into payload.txt.
+
+$script = @'
+# ============================================================
+#  VaultKeeper collector — runs on target
+# ============================================================
+$ErrorActionPreference = 'SilentlyContinue'
+$report = "$env:USERPROFILE\Desktop\vaultkeeper_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$lines  = New-Object System.Collections.Generic.List[string]
+
+function Add-Section([string]$name) {
+    $lines.Add("")
+    $lines.Add("--- $name ---")
+}
+
+function Add-Line([string]$text) { $lines.Add($text) }
+
+# ---------- IDENTITY ----------
+Add-Section 'IDENTITY'
+Add-Line "Timestamp    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+Add-Line "Hostname     : $env:COMPUTERNAME"
+Add-Line "User         : $env:USERDOMAIN\$env:USERNAME"
+Add-Line "Workgroup    : $env:USERDOMAIN"
+Add-Line "PSVersion    : $($PSVersionTable.PSVersion)"
+$cs = Get-CimInstance Win32_ComputerSystem
+Add-Line "Manufacturer : $($cs.Manufacturer)"
+Add-Line "Model        : $($cs.Model)"
+Add-Line "Chassis      : $($cs.PCSystemType)"
+
+# ---------- OPERATING SYSTEM ----------
+Add-Section 'OPERATING SYSTEM'
+$os = Get-CimInstance Win32_OperatingSystem
+Add-Line "Caption      : $($os.Caption)"
+Add-Line "Version      : $($os.Version)  Build $($os.BuildNumber)"
+Add-Line "Architecture : $($os.OSArchitecture)"
+Add-Line "Install Date : $($os.InstallDate)"
+Add-Line "Last Boot    : $($os.LastBootUpTime)"
+Add-Line "System Dir   : $($os.SystemDirectory)"
+Add-Line "Time Zone    : $((Get-TimeZone).Id)"
+
+# ---------- FIRMWARE ----------
+Add-Section 'FIRMWARE'
+$bios = Get-CimInstance Win32_BIOS
+Add-Line "Vendor       : $($bios.Manufacturer)"
+Add-Line "Version      : $($bios.SMBIOSBIOSVersion)"
+Add-Line "Release Date : $($bios.ReleaseDate)"
+Add-Line "Serial       : $($bios.SerialNumber)"
+$bb = Get-CimInstance Win32_BaseBoard
+Add-Line "Mainboard    : $($bb.Manufacturer) $($bb.Product)"
+
+# ---------- HARDWARE ----------
+Add-Section 'HARDWARE'
+$cpu = Get-CimInstance Win32_Processor
+Add-Line "CPU          : $($cpu.Name)"
+Add-Line "Cores/Threads: $($cpu.NumberOfCores) / $($cpu.NumberOfLogicalProcessors)"
+$ram = Get-CimInstance Win32_PhysicalMemory |
+       Measure-Object -Property Capacity -Sum
+Add-Line "RAM          : $([math]::Round($ram.Sum/1GB,2)) GB"
+Get-CimInstance Win32_DiskDrive | ForEach-Object {
+    Add-Line "Disk         : $($_.Model) - $([math]::Round($_.Size/1GB,1)) GB"
+}
+Get-CimInstance Win32_VideoController | ForEach-Object {
+    Add-Line "GPU          : $($_.Name) ($([math]::Round($_.AdapterRAM/1MB,0)) MB)"
+}
+
+# ---------- NETWORK ----------
+Add-Section 'NETWORK'
+Get-NetIPAddress -AddressFamily IPv4 |
+    Where-Object { $_.IPAddress -ne '127.0.0.1' } |
+    ForEach-Object {
+        Add-Line "IPv4         : $($_.IPAddress)/$($_.PrefixLength) [$($_.InterfaceAlias)]"
+    }
+$gw = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).NextHop
+Add-Line "Gateway      : $gw"
+$dns = Get-DnsClientServerAddress -AddressFamily IPv4 |
+       Select-Object -ExpandProperty ServerAddresses -Unique
+Add-Line "DNS          : $($dns -join ', ')"
+$macs = Get-NetAdapter | Where-Object Status -eq 'Up' |
+        ForEach-Object { "$($_.Name):$($_.MacAddress)" }
+Add-Line "MACs (up)    : $($macs -join '; ')"
+
+# Optional: public IP (only if scope permits)
+if ('#COLLECT_PUBLIC_IP' -eq 'TRUE') {
+    $pub = (Invoke-WebRequest -Uri 'https://api.ipify.org' -UseBasicParsing -TimeoutSec 5).Content
+    Add-Line "Public IP    : $pub"
+}
+
+# ---------- WIFI (profile names only, no keys) ----------
+Add-Section 'WIFI PROFILES (names only)'
+$wifi = netsh wlan show profiles |
+        Select-String 'All User Profile' |
+        ForEach-Object { ($_ -split ':',2)[1].Trim() }
+Add-Line "Count        : $($wifi.Count)"
+$wifi | ForEach-Object { Add-Line "  $_" }
+$wifiIface = netsh wlan show interfaces |
+             Select-String '^\s*State' |
+             ForEach-Object { ($_ -split ':',2)[1].Trim() }
+Add-Line "Interface    : $($wifiIface -join ', ')"
+
+# ---------- SECURITY POSTURE ----------
+Add-Section 'SECURITY POSTURE'
+$av = Get-CimInstance -Namespace 'root/SecurityCenter2' `
+      -ClassName 'AntiVirusProduct' -ErrorAction SilentlyContinue
+Add-Line "AV           : $($av.displayName -join ', ')"
+$fw = Get-NetFirewallProfile | ForEach-Object { "$($_.Name)=$($_.Enabled)" }
+Add-Line "Firewall     : $($fw -join ' ')"
+$uac = (Get-ItemProperty `
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+        -ErrorAction SilentlyContinue).EnableLUA
+Add-Line "UAC (EnableLUA) : $uac"
+$bl = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction SilentlyContinue
+Add-Line "BitLocker C: : $($bl.ProtectionStatus)"
+Add-Line "Secure Boot  : $(Confirm-SecureBootUEFI -ErrorAction SilentlyContinue)"
+Add-Line "TPM Present  : $((Get-CimInstance -Namespace 'root/cimv2/security/microsofttpm' `
+                  -ClassName Win32_Tpm -ErrorAction SilentlyContinue) -ne $null)"
+
+# ---------- LOCAL ADMINS ----------
+Add-Section 'LOCAL ADMINISTRATORS'
+$admins = (net localgroup administrators |
+           Select-Object -Skip 6 |
+           Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch 'command completed' })
+$admins | ForEach-Object { Add-Line "  $_" }
+
+# ---------- INSTALLED SOFTWARE ----------
+Add-Section "INSTALLED SOFTWARE (top #SOFTWARE_TOP)"
+$paths = @(
+  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName } |
+    Select-Object -Unique DisplayName, DisplayVersion, Publisher, InstallDate |
+    Sort-Object DisplayName |
+    Select-Object -First #SOFTWARE_TOP |
+    ForEach-Object {
+        Add-Line ("  {0,-45} {1,-15} {2}" -f `
+            $_.DisplayName, $_.DisplayVersion, $_.Publisher)
+    }
+
+# ---------- TOP PROCESSES ----------
+Add-Section "TOP PROCESSES (RAM, top #PROCESSES_TOP)"
+Get-Process |
+    Sort-Object WorkingSet64 -Descending |
+    Select-Object -First #PROCESSES_TOP |
+    ForEach-Object {
+        Add-Line ("  {0,-28} {1,7} MB  PID {2}" -f `
+            $_.ProcessName,
+            [math]::Round($_.WorkingSet64/1MB,1),
+            $_.Id)
+    }
+
+# ---------- WRITE REPORT ----------
+$lines.Add('')
+$lines.Add('--- END REPORT ---')
+$lines -join "`r`n" | Out-File -FilePath $report -Encoding ASCII
+
+# ---------- OPTIONAL CLEANUP ----------
+if ('#CLEAR_HISTORY' -eq 'TRUE') {
+    Remove-Item (Get-PSReadLineOption).HistorySavePath -ErrorAction SilentlyContinue
+}
+
+# ---------- SIGNAL COMPLETION ----------
+Write-Host "VaultKeeper report: $report"
+'@
+
+# Substitute DEFINE-style placeholders with concrete values
+$script = $script -replace '#COLLECT_PUBLIC_IP', 'FALSE'
+$script = $script -replace '#CLEAR_HISTORY',     'FALSE'
+$script = $script -replace '#SOFTWARE_TOP',      '40'
+$script = $script -replace '#PROCESSES_TOP',     '15'
+
+# Base64-encode as UTF-16LE (required by -EncodedCommand)
+$bytes = [System.Text.Encoding]::Unicode.GetBytes($script)
+[Convert]::ToBase64String($bytes)

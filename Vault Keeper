@@ -1,0 +1,45 @@
+REM Title: VaultKeeper — Comprehensive Windows Host Profiler
+REM Author: D-L3aN
+REM Description: Non-destructive Windows host reconnaissance. Collects
+REM              identity, OS, firmware, hardware, network config (no
+REM              secrets), security posture, installed software, and top
+REM              processes. Writes one plain-text report. No persistence.
+REM              No cloud calls. No credential collection.
+REM Target: Windows 10 / 11
+REM Props: Inspired by NullSec System Profiler (bad-antics)
+REM Version: 1.0
+REM Category: recon
+
+REM ============================================================
+REM  CONFIGURATION
+REM ============================================================
+DEFINE #BOOT_DELAY        2500
+DEFINE #SETTLE            2500
+DEFINE #REPORT_NAME       vaultkeeper
+DEFINE #SOFTWARE_TOP      40
+DEFINE #PROCESSES_TOP     15
+
+REM Privacy / legal switches — leave FALSE unless the engagement
+REM scope explicitly authorizes these.
+DEFINE #COLLECT_PUBLIC_IP FALSE
+DEFINE #CLEAR_HISTORY     FALSE
+
+REM ============================================================
+REM  ENCODED POWERSHELL PAYLOAD
+REM  (see build.ps1 in this folder to regenerate)
+REM ============================================================
+DELAY #BOOT_DELAY
+
+GUI r
+DELAY 700
+STRING powershell -NoP -NonI -W Hidden -Exec Bypass -EncodedCommand
+STRING  <REPLACE_WITH_BASE64_FROM_build.ps1>
+ENTER
+
+REM ============================================================
+REM  WAIT FOR COLLECTION TO FINISH
+REM  Adjust upward if the target has a slow disk or a large
+REM  software inventory. The report appears on the Desktop.
+REM ============================================================
+DELAY #SETTLE
+DELAY 4000
